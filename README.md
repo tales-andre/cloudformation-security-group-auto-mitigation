@@ -8,7 +8,7 @@ This project provides an AWS CloudFormation template that monitors and automatic
 - **Auto-Mitigation**: Automatically revokes ingress rules that are not on the allowed ports or that expose other ports to the public IP.
 - **Customizable Configuration**: Easy to adjust to add or remove allowed ports.
 
-## Allowed Ports
+## Allowed Ports with Source IP 0.0.0.0/0
 
 - **80** (HTTP)
 - **443** (HTTPS)
@@ -43,7 +43,7 @@ Este projeto fornece um template AWS CloudFormation que monitora e automaticamen
 - **Auto-Mitigação**: Revoga automaticamente regras de ingresso que não estão nas portas permitidas ou que expõem outras portas para o IP público.
 - **Configuração Personalizável**: Fácil de ajustar para adicionar ou remover portas permitidas.
 
-## Portas Permitidas
+## Portas Permitidas com Source IP 0.0.0.0/0
 
 - **80** (HTTP)
 - **443** (HTTPS)
