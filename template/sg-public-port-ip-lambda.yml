@@ -1,0 +1,216 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: |
+  Monitora e auto-mitiga alterações em Security Groups existentes.
+
+Metadata:
+  License:
+    Description: |
+      Copyright 2017 Amazon.com, Inc. ou suas afiliadas. Todos os direitos reservados.
+
+      Licenciado sob a Licença Apache, Versão 2.0 (a "Licença"). Você não pode usar este arquivo exceto em conformidade com a Licença. Uma cópia da Licença está localizada em
+
+          http://aws.amazon.com/apache2.0/
+
+      ou no arquivo "license" que acompanha este arquivo. Este arquivo é distribuído na base "COMO ESTÁ", SEM GARANTIAS OU CONDIÇÕES DE QUALQUER TIPO, expressas ou implícitas. Consulte a Licença para a linguagem específica que rege as permissões e limitações sob a Licença.
+
+Parameters: {}
+
+Resources:
+
+  SecurityGroupChangeAutoResponseRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          -
+            Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        -
+          PolicyName: SecurityGroupModification
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              -
+                Sid: AllowSecurityGroupActions
+                Effect: Allow
+                Action:
+                  - ec2:RevokeSecurityGroupIngress
+                Resource: !Sub arn:aws:ec2:${AWS::Region}:${AWS::AccountId}:security-group/*
+
+  SecurityGroupChangeAutoResponse:
+    Type: AWS::Lambda::Function
+    Properties:
+      Description: Responde a alterações em Security Groups
+      Handler: index.lambda_handler
+      MemorySize: 1024
+      Role: !GetAtt SecurityGroupChangeAutoResponseRole.Arn
+      Runtime: python3.9
+      Timeout: 60
+      Code:
+        ZipFile: |
+          import os, json, boto3
+
+          #===============================================================================
+          def lambda_handler(event, context):
+
+              print(event)
+
+              # Certifique-se de que temos um nome de evento para avaliar.
+              if 'detail' not in event or ('detail' in event and 'eventName' not in event['detail']):
+                  return {"Result": "Failure", "Message": "Lambda não acionada por um evento"}
+
+              # Processa o evento se for um evento de autorização de ingresso
+              if event['detail']['eventName'] == 'AuthorizeSecurityGroupIngress':
+                  result = revoke_security_group_ingress(event['detail'])
+
+                  if result:
+                      message = "AUTO-MITIGATED: Regra de ingresso removida do security group: {} que foi adicionada por {}: {}".format(
+                              result['group_id'],
+                              result['user_name'],
+                              json.dumps(result['ip_permissions'])
+                              )
+
+                      print(message)
+                  else:
+                      print("Nenhuma permissão correspondente para revogar")
+
+          #===============================================================================
+          def revoke_security_group_ingress(event_detail):
+
+              allowed_ports = [80, 443, 53, 123, 993, 995, 1194, 1935]
+
+              request_parameters = event_detail['requestParameters']
+
+              # Normaliza a estrutura JSON das permissões IP.
+              ip_permissions = normalize_paramter_names(request_parameters['ipPermissions']['items'])
+
+              filtered_ip_permissions = []
+
+              for perm in ip_permissions:
+                  from_port = perm['FromPort']
+                  to_port = perm['ToPort']
+
+                  new_perm = {'IpProtocol': perm['IpProtocol'], 'FromPort': from_port, 'ToPort': to_port}
+
+                  # Para ranges IPv4
+                  if 'IpRanges' in perm:
+                      ip_ranges = []
+                      for ip_range in perm['IpRanges']:
+                          if ip_range.get('CidrIp') == '0.0.0.0/0':
+                              if from_port == to_port and from_port in allowed_ports:
+                                  # Porta permitida, não fazer nada
+                                  pass
+                              else:
+                                  ip_ranges.append(ip_range)
+                      if ip_ranges:
+                          new_perm['IpRanges'] = ip_ranges
+                          filtered_ip_permissions.append(new_perm)
+                  # Para ranges IPv6
+                  if 'Ipv6Ranges' in perm:
+                      ipv6_ranges = []
+                      for ipv6_range in perm['Ipv6Ranges']:
+                          if ipv6_range.get('CidrIpv6') == '::/0':
+                              if from_port == to_port and from_port in allowed_ports:
+                                  # Porta permitida, não fazer nada
+                                  pass
+                              else:
+                                  ipv6_ranges.append(ipv6_range)
+                      if ipv6_ranges:
+                          new_perm['Ipv6Ranges'] = ipv6_ranges
+                          filtered_ip_permissions.append(new_perm)
+
+              if filtered_ip_permissions:
+                  response = boto3.client('ec2').revoke_security_group_ingress(
+                      GroupId = request_parameters['groupId'],
+                      IpPermissions = filtered_ip_permissions
+                      )
+
+                  # Monta o resultado
+                  result = {}
+                  result['group_id'] = request_parameters['groupId']
+                  result['user_name'] = event_detail['userIdentity']['arn']
+                  result['ip_permissions'] = filtered_ip_permissions
+
+                  return result
+              else:
+                  # Nenhuma permissão correspondente para revogar
+                  return None
+
+          #===============================================================================
+          def normalize_paramter_names(ip_items):
+
+              # Inicia a construção da lista de itens de permissões.
+              new_ip_items = []
+
+              # Primeiro, constrói a lista básica de parâmetros.
+              for ip_item in ip_items:
+
+                  new_ip_item = {
+                      "IpProtocol": ip_item['ipProtocol'],
+                      "FromPort": ip_item['fromPort'],
+                      "ToPort": ip_item['toPort']
+                  }
+
+                  # CidrIp ou CidrIpv6 (IPv4 ou IPv6)?
+                  if 'ipv6Ranges' in ip_item and ip_item['ipv6Ranges']:
+                      # Este é um range de permissão IPv6, então altere os nomes das chaves.
+                      ipv_range_list_name = 'ipv6Ranges'
+                      ipv_address_value = 'cidrIpv6'
+                      ipv_range_list_name_capitalized = 'Ipv6Ranges'
+                      ipv_address_value_capitalized = 'CidrIpv6'
+                  else:
+                      ipv_range_list_name = 'ipRanges'
+                      ipv_address_value = 'cidrIp'
+                      ipv_range_list_name_capitalized = 'IpRanges'
+                      ipv_address_value_capitalized = 'CidrIp'
+
+                  ip_ranges = []
+
+                  # Em seguida, constrói a lista de permissões IP.
+                  for item in ip_item.get(ipv_range_list_name, {}).get('items', []):
+                      ip_ranges.append(
+                          {ipv_address_value_capitalized : item[ipv_address_value]}
+                          )
+
+                  new_ip_item[ipv_range_list_name_capitalized] = ip_ranges
+
+                  new_ip_items.append(new_ip_item)
+
+              return new_ip_items
+
+  SecurityGroupChangeAutoResponseLambdaPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      FunctionName: !Ref SecurityGroupChangeAutoResponse
+
+  TriggeredRuleForSecurityGroupChangeAutoResponse:
+    Type: AWS::Events::Rule
+    Properties:
+      Description: Responde a eventos de alteração em Security Groups
+      EventPattern:
+        detail:
+          eventSource:
+            - ec2.amazonaws.com
+          eventName:
+            - AuthorizeSecurityGroupIngress
+            - AuthorizeSecurityGroupEgress
+            - RevokeSecurityGroupEgress
+            - RevokeSecurityGroupIngress
+            - CreateSecurityGroup
+            - DeleteSecurityGroup
+      State: ENABLED
+      Targets:
+        -
+          Arn: !GetAtt SecurityGroupChangeAutoResponse.Arn
+          Id: TargetFunctionV1
+
+Outputs: {}
