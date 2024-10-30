@@ -94,17 +94,25 @@ Resources:
               filtered_ip_permissions = []
 
               for perm in ip_permissions:
-                  from_port = perm['FromPort']
-                  to_port = perm['ToPort']
+                  ip_protocol = perm['IpProtocol']
+                  from_port = perm.get('FromPort')
+                  to_port = perm.get('ToPort')
 
-                  new_perm = {'IpProtocol': perm['IpProtocol'], 'FromPort': from_port, 'ToPort': to_port}
+                  new_perm = {'IpProtocol': ip_protocol}
+
+                  # Adiciona FromPort e ToPort apenas se eles estiverem presentes
+                  if 'FromPort' in perm and 'ToPort' in perm:
+                      new_perm['FromPort'] = from_port
+                      new_perm['ToPort'] = to_port
 
                   # Para ranges IPv4
                   if 'IpRanges' in perm:
                       ip_ranges = []
                       for ip_range in perm['IpRanges']:
                           if ip_range.get('CidrIp') == '0.0.0.0/0':
-                              if from_port == to_port and from_port in allowed_ports:
+                              if ip_protocol == '-1':
+                                  ip_ranges.append(ip_range)
+                              elif from_port == to_port and from_port in allowed_ports:
                                   # Porta permitida, não fazer nada
                                   pass
                               else:
@@ -117,7 +125,9 @@ Resources:
                       ipv6_ranges = []
                       for ipv6_range in perm['Ipv6Ranges']:
                           if ipv6_range.get('CidrIpv6') == '::/0':
-                              if from_port == to_port and from_port in allowed_ports:
+                              if ip_protocol == '-1':
+                                  ipv6_ranges.append(ipv6_range)
+                              elif from_port == to_port and from_port in allowed_ports:
                                   # Porta permitida, não fazer nada
                                   pass
                               else:
@@ -153,10 +163,13 @@ Resources:
               for ip_item in ip_items:
 
                   new_ip_item = {
-                      "IpProtocol": ip_item['ipProtocol'],
-                      "FromPort": ip_item['fromPort'],
-                      "ToPort": ip_item['toPort']
+                      "IpProtocol": ip_item['ipProtocol']
                   }
+
+                  # Adiciona FromPort e ToPort apenas se eles estiverem presentes
+                  if 'fromPort' in ip_item and 'toPort' in ip_item:
+                      new_ip_item['FromPort'] = ip_item['fromPort']
+                      new_ip_item['ToPort'] = ip_item['toPort']
 
                   # CidrIp ou CidrIpv6 (IPv4 ou IPv6)?
                   if 'ipv6Ranges' in ip_item and ip_item['ipv6Ranges']:
